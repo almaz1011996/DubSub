@@ -106,6 +106,32 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tab {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: #b9c3d1;
+  padding: 8px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tab.active {
+  background: rgba(255, 255, 255, 0.16);
+  color: #f6f2eb;
+}
+
+.tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .local-upload {
   display: grid;
   gap: 12px;

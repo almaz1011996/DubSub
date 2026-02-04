@@ -6,3 +6,4 @@ storage/uploads/
 storage/jobs/
 apps/web/dist/
 apps/server/dist/
+.venv

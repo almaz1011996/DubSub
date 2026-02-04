@@ -82,13 +82,19 @@ function Player({
   enVttUrl,
   ruVttUrl,
   showEn,
-  showRu
+  showRu,
+  videoRef,
+  onTimeUpdate,
+  seekTo
 }: {
   videoUrl: string;
   enVttUrl: string;
   ruVttUrl: string;
   showEn: boolean;
   showRu: boolean;
+  videoRef: React.RefObject<HTMLVideoElement>;
+  onTimeUpdate?: (time: number) => void;
+  seekTo?: number | null;
 }) {
   const enTrackRef = useRef<HTMLTrackElement>(null);
   const ruTrackRef = useRef<HTMLTrackElement>(null);
@@ -96,9 +102,38 @@ function Player({
   const enText = useTextTrack(enTrackRef, enVttUrl);
   const ruText = useTextTrack(ruTrackRef, ruVttUrl);
 
+  useEffect(() => {
+    if (seekTo == null) return;
+    const video = videoRef.current;
+    if (!video) return;
+    if (Number.isNaN(seekTo)) return;
+
+    const applySeek = () => {
+      try {
+        video.currentTime = seekTo;
+      } catch {
+        return;
+      }
+    };
+
+    if (video.readyState >= 1) {
+      applySeek();
+      return;
+    }
+
+    video.addEventListener("loadedmetadata", applySeek, { once: true });
+    return () => video.removeEventListener("loadedmetadata", applySeek);
+  }, [seekTo, videoRef, videoUrl]);
+
   return (
     <div className="player">
-      <video controls className="video" crossOrigin="anonymous">
+      <video
+        ref={videoRef}
+        controls
+        className="video"
+        crossOrigin="anonymous"
+        onTimeUpdate={(e) => onTimeUpdate?.((e.target as HTMLVideoElement).currentTime)}
+      >
         <source src={videoUrl} />
         <track ref={enTrackRef} kind="subtitles" srcLang="en" src={enVttUrl} />
         <track ref={ruTrackRef} kind="subtitles" srcLang="ru" src={ruVttUrl} />
@@ -118,6 +153,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showEn, setShowEn] = useState(true);
   const [showRu, setShowRu] = useState(true);
+  const [playerMode, setPlayerMode] = useState<"processed" | "local">("local");
+  const [processedTime, setProcessedTime] = useState(0);
+  const [localTime, setLocalTime] = useState(0);
+  const [seekTarget, setSeekTarget] = useState<number | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const lastModeRef = useRef<"processed" | "local" | null>(null);
   const [localVideo, setLocalVideo] = useState<File | null>(null);
   const [localEnSub, setLocalEnSub] = useState<File | null>(null);
   const [localRuSub, setLocalRuSub] = useState<File | null>(null);
@@ -175,6 +216,26 @@ export default function App() {
   const done = status?.state === "done";
   const hasError = status?.state === "error";
   const hasLocalPlayer = Boolean(localVideoUrl && (localEnUrl || localRuUrl));
+
+  useEffect(() => {
+    if (done) {
+      setPlayerMode("processed");
+      return;
+    }
+    if (localVideoUrl) {
+      setPlayerMode("local");
+    }
+  }, [done, localVideoUrl]);
+
+  useEffect(() => {
+    if (lastModeRef.current === playerMode) return;
+    lastModeRef.current = playerMode;
+    if (playerMode === "processed") {
+      setSeekTarget(processedTime);
+    } else {
+      setSeekTarget(localTime);
+    }
+  }, [playerMode]);
 
   useEffect(() => {
     if (!localVideo) {
@@ -285,35 +346,25 @@ export default function App() {
         {error && <div className="error">{error}</div>}
       </section>
 
-      {done && jobId && (
-        <section className="card">
-          <div className="toggles">
-            <label>
-              <input type="checkbox" checked={showEn} onChange={(e) => setShowEn(e.target.checked)} /> EN
-            </label>
-            <label>
-              <input type="checkbox" checked={showRu} onChange={(e) => setShowRu(e.target.checked)} /> RU
-            </label>
-          </div>
-          <div className="download">
-            <span>Download subtitles:</span>
-            <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.srt`}>EN SRT</a>
-            <a href={`${API_BASE}/api/jobs/${jobId}/subs/ru.srt`}>RU SRT</a>
-            <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.vtt`}>EN VTT</a>
-            <a href={`${API_BASE}/api/jobs/${jobId}/subs/ru.vtt`}>RU VTT</a>
-          </div>
-          <Player
-            videoUrl={`${API_BASE}/api/jobs/${jobId}/asset`}
-            enVttUrl={`${API_BASE}/api/jobs/${jobId}/subs/en`}
-            ruVttUrl={`${API_BASE}/api/jobs/${jobId}/subs/ru`}
-            showEn={showEn}
-            showRu={showRu}
-          />
-        </section>
-      )}
-
       <section className="card">
-        <div className="section-title">Local player (no processing)</div>
+        <div className="section-title">Player</div>
+        <div className="tabs">
+          <button
+            className={`tab ${playerMode === "processed" ? "active" : ""}`}
+            onClick={() => setPlayerMode("processed")}
+            disabled={!done || !jobId}
+            type="button"
+          >
+            Processed
+          </button>
+          <button
+            className={`tab ${playerMode === "local" ? "active" : ""}`}
+            onClick={() => setPlayerMode("local")}
+            type="button"
+          >
+            Local
+          </button>
+        </div>
         <div className="toggles">
           <label>
             <input type="checkbox" checked={showEn} onChange={(e) => setShowEn(e.target.checked)} /> EN
@@ -322,6 +373,41 @@ export default function App() {
             <input type="checkbox" checked={showRu} onChange={(e) => setShowRu(e.target.checked)} /> RU
           </label>
         </div>
+        {playerMode === "processed" && done && jobId && (
+          <div className="download">
+            <span>Download subtitles:</span>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.srt`}>EN SRT</a>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/ru.srt`}>RU SRT</a>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.vtt`}>EN VTT</a>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/ru.vtt`}>RU VTT</a>
+          </div>
+        )}
+        {playerMode === "processed" && done && jobId && (
+          <Player
+            videoUrl={`${API_BASE}/api/jobs/${jobId}/asset`}
+            enVttUrl={`${API_BASE}/api/jobs/${jobId}/subs/en`}
+            ruVttUrl={`${API_BASE}/api/jobs/${jobId}/subs/ru`}
+            showEn={showEn}
+            showRu={showRu}
+            videoRef={videoRef}
+            onTimeUpdate={(time) => setProcessedTime(time)}
+            seekTo={seekTarget}
+          />
+        )}
+        {playerMode === "local" && hasLocalPlayer && localVideoUrl && (
+          <Player
+            videoUrl={localVideoUrl}
+            enVttUrl={localEnUrl ?? ""}
+            ruVttUrl={localRuUrl ?? ""}
+            showEn={showEn}
+            showRu={showRu}
+            videoRef={videoRef}
+            onTimeUpdate={(time) => setLocalTime(time)}
+            seekTo={seekTarget}
+          />
+        )}
+        {playerMode === "local" && !localVideoUrl && <div className="hint">Choose a video file to start.</div>}
+
         <div className="local-upload">
           <label>
             Video
@@ -344,16 +430,6 @@ export default function App() {
             />
           </label>
         </div>
-        {hasLocalPlayer && localVideoUrl && (
-          <Player
-            videoUrl={localVideoUrl}
-            enVttUrl={localEnUrl ?? ""}
-            ruVttUrl={localRuUrl ?? ""}
-            showEn={showEn}
-            showRu={showRu}
-          />
-        )}
-        {!localVideoUrl && <div className="hint">Choose a video file to start.</div>}
       </section>
 
       {hasError && <div className="error">Processing failed. Check server logs.</div>}
