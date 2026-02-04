@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+.env
+.env.local
+storage/uploads/
+storage/jobs/
+apps/web/dist/
+apps/server/dist/

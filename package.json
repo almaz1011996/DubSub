@@ -1,0 +1,15 @@
+{
+  "name": "dubsub",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm -w apps/server run dev\" \"npm -w apps/web run dev\"",
+    "build": "npm -w apps/server run build && npm -w apps/web run build",
+    "start": "npm -w apps/server run start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}
