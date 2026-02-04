@@ -16,6 +16,8 @@ const WHISPER_MODEL = process.env.WHISPER_MODEL ?? "small";
 
 type JobState = "queued" | "processing" | "done" | "error";
 type JobStep = "upload" | "extract" | "asr" | "translate" | "convert";
+type StepTiming = { startMs: number; endMs?: number; durationMs?: number };
+type StepTimings = Partial<Record<JobStep, StepTiming>>;
 
 interface Job {
   id: string;
@@ -34,6 +36,9 @@ interface Job {
   enVttPath: string;
   ruVttPath: string;
   createdAt: number;
+  processingStartedAt?: number;
+  processingFinishedAt?: number;
+  stepTimings?: StepTimings;
 }
 
 const jobs = new Map<string, Job>();
@@ -55,6 +60,83 @@ function updateJob(job: Job, patch: Partial<Job>) {
   const next = { ...current, ...patch };
   jobs.set(job.id, next);
   return next;
+}
+
+function markStepStart(jobId: string, step: JobStep, startProcessing = false) {
+  const current = jobs.get(jobId);
+  if (!current) return;
+  const now = Date.now();
+  const timings: StepTimings = { ...(current.stepTimings ?? {}) };
+  const existing = timings[step];
+  timings[step] = { startMs: existing?.startMs ?? now, endMs: existing?.endMs, durationMs: existing?.durationMs };
+  const patch: Partial<Job> = { stepTimings: timings };
+  if (startProcessing && !current.processingStartedAt) {
+    patch.processingStartedAt = now;
+  }
+  updateJob(current, patch);
+}
+
+function markStepEnd(jobId: string, step: JobStep) {
+  const current = jobs.get(jobId);
+  if (!current) return;
+  const now = Date.now();
+  const timings: StepTimings = { ...(current.stepTimings ?? {}) };
+  const existing = timings[step];
+  const startMs = existing?.startMs ?? now;
+  timings[step] = {
+    startMs,
+    endMs: now,
+    durationMs: Math.max(0, now - startMs)
+  };
+  updateJob(current, { stepTimings: timings });
+}
+
+function finalizeProcessing(jobId: string) {
+  const current = jobs.get(jobId);
+  if (!current) return;
+  if (!current.processingFinishedAt && current.processingStartedAt) {
+    updateJob(current, { processingFinishedAt: Date.now() });
+  }
+}
+
+function closeOpenStepOnError(job: Job) {
+  const current = jobs.get(job.id) ?? job;
+  const timings: StepTimings = { ...(current.stepTimings ?? {}) };
+  const step = current.step;
+  const existing = timings[step];
+  if (existing?.startMs && !existing.endMs) {
+    const now = Date.now();
+    timings[step] = {
+      ...existing,
+      endMs: now,
+      durationMs: Math.max(0, now - existing.startMs)
+    };
+    updateJob(current, {
+      stepTimings: timings,
+      processingFinishedAt: current.processingFinishedAt ?? now
+    });
+    return;
+  }
+  if (!current.processingFinishedAt && current.processingStartedAt) {
+    updateJob(current, { processingFinishedAt: Date.now() });
+  }
+}
+
+const STEP_ORDER: JobStep[] = ["upload", "extract", "asr", "translate", "convert"];
+
+function buildStepDurations(job: Job) {
+  const out: Record<JobStep, number | null> = {
+    upload: null,
+    extract: null,
+    asr: null,
+    translate: null,
+    convert: null
+  };
+  for (const step of STEP_ORDER) {
+    const duration = job.stepTimings?.[step]?.durationMs;
+    out[step] = Number.isFinite(duration) ? (duration as number) : null;
+  }
+  return out;
 }
 
 function runCommand(cmd: string, args: string[], cwd?: string) {
@@ -216,6 +298,7 @@ async function processQueue() {
     await runJob(job);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    closeOpenStepOnError(job);
     updateJob(job, { state: "error", error: message });
   } finally {
     isProcessing = false;
@@ -225,25 +308,34 @@ async function processQueue() {
 
 async function runJob(job: Job) {
   updateJob(job, { state: "processing", step: "extract", progress: 10 });
+  markStepStart(job.id, "extract", true);
   const jobFolder = path.dirname(job.assetPath);
   const audioPath = path.join(jobFolder, "audio.wav");
   await runCommand("ffmpeg", ["-y", "-i", job.assetPath, "-vn", "-ac", "1", "-ar", "16000", audioPath]);
+  markStepEnd(job.id, "extract");
 
   const audioDuration = await getMediaDurationSeconds(audioPath);
   updateJob(job, { step: "asr", progress: 40, asrTotalSec: audioDuration });
+  markStepStart(job.id, "asr");
   const asrScript = path.join(rootDir, "apps", "server", "scripts", "asr.py");
   await runAsrWithProgress(job, asrScript, audioPath, job.enSrtPath, audioDuration);
+  markStepEnd(job.id, "asr");
 
   updateJob(job, { step: "translate", progress: 70 });
+  markStepStart(job.id, "translate");
   const translateScript = path.join(rootDir, "apps", "server", "scripts", "translate.py");
   await runCommand("python", [translateScript, job.enSrtPath, job.ruSrtPath]);
+  markStepEnd(job.id, "translate");
 
   updateJob(job, { step: "convert", progress: 90 });
+  markStepStart(job.id, "convert");
   const enSrt = await fs.readFile(job.enSrtPath, "utf-8");
   const ruSrt = await fs.readFile(job.ruSrtPath, "utf-8");
   await fs.writeFile(job.enVttPath, srtToVtt(enSrt), "utf-8");
   await fs.writeFile(job.ruVttPath, srtToVtt(ruSrt), "utf-8");
+  markStepEnd(job.id, "convert");
 
+  finalizeProcessing(job.id);
   updateJob(job, { state: "done", progress: 100 });
 }
 
@@ -288,6 +380,14 @@ app.post("/api/jobs", upload.single("file"), async (req, res) => {
 app.get("/api/jobs/:id", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: "not found" });
+  const now = Date.now();
+  const elapsedMs = job.processingStartedAt
+    ? (job.processingFinishedAt ?? now) - job.processingStartedAt
+    : null;
+  const totalDurationMs =
+    job.processingStartedAt && job.processingFinishedAt
+      ? job.processingFinishedAt - job.processingStartedAt
+      : null;
   return res.json({
     jobId: job.id,
     state: job.state,
@@ -296,7 +396,12 @@ app.get("/api/jobs/:id", (req, res) => {
     error: job.error ?? null,
     asrProcessedSec: job.asrProcessedSec ?? null,
     asrTotalSec: job.asrTotalSec ?? null,
-    asrSpeed: job.asrSpeed ?? null
+    asrSpeed: job.asrSpeed ?? null,
+    processingStartedAt: job.processingStartedAt ?? null,
+    processingFinishedAt: job.processingFinishedAt ?? null,
+    elapsedMs,
+    totalDurationMs,
+    stepDurationsMs: buildStepDurations(job)
   });
 });
 

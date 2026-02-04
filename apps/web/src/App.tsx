@@ -4,21 +4,40 @@ const API_BASE =
   import.meta.env.VITE_API_BASE ??
   (window.location.port === "5173" ? "http://localhost:3001" : "");
 
+type JobStep = "upload" | "extract" | "asr" | "translate" | "convert";
+
 type JobStatus = {
   jobId: string;
   state: "queued" | "processing" | "done" | "error";
-  step: "upload" | "extract" | "asr" | "translate" | "convert";
+  step: JobStep;
   progress: number;
   error: string | null;
   asrProcessedSec: number | null;
   asrTotalSec: number | null;
   asrSpeed: number | null;
+  processingStartedAt: number | null;
+  processingFinishedAt: number | null;
+  elapsedMs: number | null;
+  totalDurationMs: number | null;
+  stepDurationsMs: Partial<Record<JobStep, number | null>> | null;
 };
 
 function formatSeconds(value: number | null) {
   if (!value || !Number.isFinite(value)) return "-";
   const mins = Math.floor(value / 60);
   const secs = Math.floor(value % 60);
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function formatDurationMs(value: number | null) {
+  if (value == null || !Number.isFinite(value)) return "-";
+  const totalSec = Math.max(0, Math.round(value / 1000));
+  const hours = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
@@ -165,6 +184,7 @@ export default function App() {
   const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
   const [localEnUrl, setLocalEnUrl] = useState<string | null>(null);
   const [localRuUrl, setLocalRuUrl] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now());
 
   useEffect(() => {
     if (!jobId) return;
@@ -216,6 +236,11 @@ export default function App() {
   const done = status?.state === "done";
   const hasError = status?.state === "error";
   const hasLocalPlayer = Boolean(localVideoUrl && (localEnUrl || localRuUrl));
+  const elapsedMs =
+    status?.processingStartedAt != null
+      ? (status.processingFinishedAt ?? nowMs) - status.processingStartedAt
+      : status?.elapsedMs ?? null;
+  const stepDurations = status?.stepDurationsMs ?? null;
 
   useEffect(() => {
     if (done) {
@@ -305,6 +330,12 @@ export default function App() {
     };
   }, [localRuSub]);
 
+  useEffect(() => {
+    if (status?.state !== "processing") return;
+    const timer = setInterval(() => setNowMs(Date.now()), 500);
+    return () => clearInterval(timer);
+  }, [status?.state]);
+
   return (
     <div className="page">
       <header className="header">
@@ -333,10 +364,23 @@ export default function App() {
               Step: <strong>{status.step}</strong>
             </div>
             <div>Progress: {status.progress}%</div>
+            {(status.state === "processing" || status.state === "done") && (
+              <div>Elapsed: {formatDurationMs(elapsedMs)}</div>
+            )}
             {status.step === "asr" && (
               <div>
                 ASR: {formatSeconds(status.asrProcessedSec)} / {formatSeconds(status.asrTotalSec)}{" "}
                 {status.asrSpeed ? `(${status.asrSpeed.toFixed(2)}x)` : ""}
+              </div>
+            )}
+            {done && stepDurations && (
+              <div className="timings">
+                <div>Step timings:</div>
+                <div>Extract: {formatDurationMs(stepDurations.extract ?? null)}</div>
+                <div>ASR: {formatDurationMs(stepDurations.asr ?? null)}</div>
+                <div>Translate: {formatDurationMs(stepDurations.translate ?? null)}</div>
+                <div>Convert: {formatDurationMs(stepDurations.convert ?? null)}</div>
+                <div>Total: {formatDurationMs(status.totalDurationMs ?? elapsedMs)}</div>
               </div>
             )}
             {status.error && <div className="error">{status.error}</div>}
