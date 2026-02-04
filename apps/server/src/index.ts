@@ -47,6 +47,7 @@ let isProcessing = false;
 
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: "2mb" }));
 
 const upload = multer({ dest: uploadsDir });
 
@@ -445,6 +446,74 @@ app.get("/api/jobs/:id/subs/ru.vtt", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).end();
   return res.download(job.ruVttPath, `${job.basename}.ru.vtt`);
+});
+
+function normalizeBaseUrl(baseUrl: string) {
+  return baseUrl.trim().replace(/\/+$/, "");
+}
+
+function buildHeaders(apiKey?: string) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json"
+  };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
+
+app.post("/api/llm/models", async (req, res) => {
+  const { baseUrl, apiKey } = req.body as { baseUrl?: string; apiKey?: string };
+  if (!baseUrl) {
+    return res.status(400).json({ error: "baseUrl required" });
+  }
+  const url = `${normalizeBaseUrl(baseUrl)}/models`;
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: buildHeaders(apiKey)
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(502).json({ error: text || "Provider error" });
+    }
+    const data = (await response.json()) as { data?: Array<{ id: string }> };
+    const models = data.data?.map((item) => ({ id: item.id })) ?? [];
+    return res.json({ models });
+  } catch (err) {
+    return res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/llm/chat", async (req, res) => {
+  const { baseUrl, apiKey, model, messages } = req.body as {
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
+    messages?: Array<{ role: string; content: string }>;
+  };
+  if (!baseUrl || !model || !messages) {
+    return res.status(400).json({ error: "baseUrl, model, messages required" });
+  }
+  const url = `${normalizeBaseUrl(baseUrl)}/chat/completions`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({ model, messages })
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(502).json({ error: text || "Provider error" });
+    }
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const message = data.choices?.[0]?.message?.content ?? "";
+    return res.json({ message });
+  } catch (err) {
+    return res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
