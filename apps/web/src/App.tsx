@@ -612,7 +612,7 @@ export default function App() {
           messages: [
             {
               role: "system",
-              content: "Ты помогаешь изучать английский. Отвечай кратко и структурированно."
+              content: "Ты помогаешь изучать английский. Отвечай кратко и структурированно. Не используй таблицы"
             },
             ...history.map((message) => ({
               role: message.role,
