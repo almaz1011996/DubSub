@@ -26,6 +26,8 @@ interface Job {
   asrProcessedSec?: number;
   asrTotalSec?: number;
   asrSpeed?: number;
+  originalFilename: string;
+  basename: string;
   assetPath: string;
   enSrtPath: string;
   ruSrtPath: string;
@@ -130,6 +132,16 @@ function srtToVtt(srtText: string) {
   }
 
   return `WEBVTT\n\n${cues.join("\n\n")}\n`;
+}
+
+function sanitizeBasename(value: string) {
+  const raw = value.trim() || "video";
+  const cleaned = raw
+    .replace(/[^\w\s.-]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return cleaned || "video";
 }
 
 async function runAsrWithProgress(
@@ -241,7 +253,10 @@ app.post("/api/jobs", upload.single("file"), async (req, res) => {
   }
 
   const id = uuidv4();
-  const ext = path.extname(req.file.originalname) || ".mp4";
+  const originalFilename = req.file.originalname || "video.mp4";
+  const ext = path.extname(originalFilename) || ".mp4";
+  const rawBasename = path.basename(originalFilename, ext) || "video";
+  const basename = sanitizeBasename(rawBasename);
   const jobFolder = path.join(jobsDir, id);
   await fs.mkdir(jobFolder, { recursive: true });
 
@@ -253,6 +268,8 @@ app.post("/api/jobs", upload.single("file"), async (req, res) => {
     state: "queued",
     step: "upload",
     progress: 0,
+    originalFilename,
+    basename,
     assetPath,
     enSrtPath: path.join(jobFolder, "en.srt"),
     ruSrtPath: path.join(jobFolder, "ru.srt"),
@@ -299,6 +316,30 @@ app.get("/api/jobs/:id/subs/ru", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).end();
   return res.sendFile(job.ruVttPath);
+});
+
+app.get("/api/jobs/:id/subs/en.srt", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).end();
+  return res.download(job.enSrtPath, `${job.basename}.en.srt`);
+});
+
+app.get("/api/jobs/:id/subs/ru.srt", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).end();
+  return res.download(job.ruSrtPath, `${job.basename}.ru.srt`);
+});
+
+app.get("/api/jobs/:id/subs/en.vtt", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).end();
+  return res.download(job.enVttPath, `${job.basename}.en.vtt`);
+});
+
+app.get("/api/jobs/:id/subs/ru.vtt", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).end();
+  return res.download(job.ruVttPath, `${job.basename}.ru.vtt`);
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));

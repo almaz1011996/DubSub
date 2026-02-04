@@ -22,12 +22,41 @@ function formatSeconds(value: number | null) {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+function srtToVttClient(srtText: string) {
+  const blocks = srtText
+    .replace(/\r/g, "")
+    .split("\n\n")
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  const cues: string[] = [];
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    if (lines.length < 2) continue;
+    let timeLineIndex = 0;
+    if (/^\d+$/.test(lines[0].trim())) {
+      timeLineIndex = 1;
+    }
+    const timeLine = lines[timeLineIndex];
+    if (!timeLine || !timeLine.includes("-->")) continue;
+    const textLines = lines.slice(timeLineIndex + 1);
+    const vttTime = timeLine.replace(/,/g, ".");
+    cues.push(`${vttTime}\n${textLines.join("\n")}`);
+  }
+
+  return `WEBVTT\n\n${cues.join("\n\n")}\n`;
+}
+
 function useTextTrack(trackRef: React.RefObject<HTMLTrackElement>, src: string) {
   const [text, setText] = useState("");
 
   useEffect(() => {
     const el = trackRef.current;
     if (!el) return;
+    if (!src) {
+      setText("");
+      return;
+    }
     const track = el.track;
     track.mode = "hidden";
 
@@ -89,6 +118,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showEn, setShowEn] = useState(true);
   const [showRu, setShowRu] = useState(true);
+  const [localVideo, setLocalVideo] = useState<File | null>(null);
+  const [localEnSub, setLocalEnSub] = useState<File | null>(null);
+  const [localRuSub, setLocalRuSub] = useState<File | null>(null);
+  const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
+  const [localEnUrl, setLocalEnUrl] = useState<string | null>(null);
+  const [localRuUrl, setLocalRuUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (!jobId) return;
@@ -139,6 +174,75 @@ export default function App() {
 
   const done = status?.state === "done";
   const hasError = status?.state === "error";
+  const hasLocalPlayer = Boolean(localVideoUrl && (localEnUrl || localRuUrl));
+
+  useEffect(() => {
+    if (!localVideo) {
+      setLocalVideoUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(localVideo);
+    setLocalVideoUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [localVideo]);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+
+    const load = async () => {
+      if (!localEnSub) {
+        setLocalEnUrl(null);
+        return;
+      }
+      const name = localEnSub.name.toLowerCase();
+      if (name.endsWith(".vtt")) {
+        objectUrl = URL.createObjectURL(localEnSub);
+        if (active) setLocalEnUrl(objectUrl);
+        return;
+      }
+      const text = await localEnSub.text();
+      const vtt = srtToVttClient(text);
+      const blob = new Blob([vtt], { type: "text/vtt" });
+      objectUrl = URL.createObjectURL(blob);
+      if (active) setLocalEnUrl(objectUrl);
+    };
+
+    load().catch(() => setLocalEnUrl(null));
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [localEnSub]);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+
+    const load = async () => {
+      if (!localRuSub) {
+        setLocalRuUrl(null);
+        return;
+      }
+      const name = localRuSub.name.toLowerCase();
+      if (name.endsWith(".vtt")) {
+        objectUrl = URL.createObjectURL(localRuSub);
+        if (active) setLocalRuUrl(objectUrl);
+        return;
+      }
+      const text = await localRuSub.text();
+      const vtt = srtToVttClient(text);
+      const blob = new Blob([vtt], { type: "text/vtt" });
+      objectUrl = URL.createObjectURL(blob);
+      if (active) setLocalRuUrl(objectUrl);
+    };
+
+    load().catch(() => setLocalRuUrl(null));
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [localRuSub]);
 
   return (
     <div className="page">
@@ -191,6 +295,13 @@ export default function App() {
               <input type="checkbox" checked={showRu} onChange={(e) => setShowRu(e.target.checked)} /> RU
             </label>
           </div>
+          <div className="download">
+            <span>Download subtitles:</span>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.srt`}>EN SRT</a>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/ru.srt`}>RU SRT</a>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.vtt`}>EN VTT</a>
+            <a href={`${API_BASE}/api/jobs/${jobId}/subs/ru.vtt`}>RU VTT</a>
+          </div>
           <Player
             videoUrl={`${API_BASE}/api/jobs/${jobId}/asset`}
             enVttUrl={`${API_BASE}/api/jobs/${jobId}/subs/en`}
@@ -200,6 +311,50 @@ export default function App() {
           />
         </section>
       )}
+
+      <section className="card">
+        <div className="section-title">Local player (no processing)</div>
+        <div className="toggles">
+          <label>
+            <input type="checkbox" checked={showEn} onChange={(e) => setShowEn(e.target.checked)} /> EN
+          </label>
+          <label>
+            <input type="checkbox" checked={showRu} onChange={(e) => setShowRu(e.target.checked)} /> RU
+          </label>
+        </div>
+        <div className="local-upload">
+          <label>
+            Video
+            <input type="file" accept="video/*" onChange={(e) => setLocalVideo(e.target.files?.[0] ?? null)} />
+          </label>
+          <label>
+            EN subtitles (SRT/VTT)
+            <input
+              type="file"
+              accept=".srt,.vtt,text/vtt,text/plain"
+              onChange={(e) => setLocalEnSub(e.target.files?.[0] ?? null)}
+            />
+          </label>
+          <label>
+            RU subtitles (SRT/VTT)
+            <input
+              type="file"
+              accept=".srt,.vtt,text/vtt,text/plain"
+              onChange={(e) => setLocalRuSub(e.target.files?.[0] ?? null)}
+            />
+          </label>
+        </div>
+        {hasLocalPlayer && localVideoUrl && (
+          <Player
+            videoUrl={localVideoUrl}
+            enVttUrl={localEnUrl ?? ""}
+            ruVttUrl={localRuUrl ?? ""}
+            showEn={showEn}
+            showRu={showRu}
+          />
+        )}
+        {!localVideoUrl && <div className="hint">Choose a video file to start.</div>}
+      </section>
 
       {hasError && <div className="error">Processing failed. Check server logs.</div>}
     </div>
