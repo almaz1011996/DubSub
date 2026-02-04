@@ -369,8 +369,17 @@ export default function App() {
             )}
             {status.step === "asr" && (
               <div>
-                ASR: {formatSeconds(status.asrProcessedSec)} / {formatSeconds(status.asrTotalSec)}{" "}
-                {status.asrSpeed ? `(${status.asrSpeed.toFixed(2)}x)` : ""}
+                {status.asrProcessedSec == null ? (
+                  <>
+                    <div>ASR: initializing model...</div>
+                    <div className="status-note">First run may take a few minutes.</div>
+                  </>
+                ) : (
+                  <>
+                    ASR: {formatSeconds(status.asrProcessedSec)} / {formatSeconds(status.asrTotalSec)}{" "}
+                    {status.asrSpeed ? `(${status.asrSpeed.toFixed(2)}x)` : ""}
+                  </>
+                )}
               </div>
             )}
             {done && stepDurations && (

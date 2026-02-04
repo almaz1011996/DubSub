@@ -75,6 +75,11 @@ button:disabled {
   color: #cdd6e2;
 }
 
+.status-note {
+  color: #b9c3d1;
+  font-style: italic;
+}
+
 .error {
   margin-top: 12px;
   color: #ff8989;
