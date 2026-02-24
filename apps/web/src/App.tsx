@@ -5,7 +5,7 @@ const API_BASE =
   import.meta.env.VITE_API_BASE ??
   (window.location.port === "5173" ? "http://localhost:3001" : "");
 
-type JobStep = "upload" | "extract" | "asr" | "translate" | "convert";
+type JobStep = "upload" | "download" | "extract" | "asr" | "translate" | "convert";
 
 type ProviderProfile = {
   id: string;
@@ -31,7 +31,7 @@ type ExplainRequest = {
 
 type JobStatus = {
   jobId: string;
-  state: "queued" | "processing" | "done" | "error";
+  state: "queued" | "ready" | "processing" | "done" | "error";
   step: JobStep;
   progress: number;
   error: string | null;
@@ -318,6 +318,7 @@ function Player({
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -394,8 +395,48 @@ export default function App() {
     setJobId(data.jobId);
   };
 
+  const handleYoutubeImport = async () => {
+    const trimmedUrl = youtubeUrl.trim();
+    if (!trimmedUrl) return;
+    setError(null);
+    setStatus(null);
+    setJobId(null);
+
+    const res = await fetch(`${API_BASE}/api/jobs/youtube`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: trimmedUrl, maxHeight: 1080 })
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || "YouTube import failed");
+    }
+
+    const data = await res.json();
+    setJobId(data.jobId);
+  };
+
+  const handleStartProcessing = async () => {
+    if (!jobId) return;
+    setError(null);
+    const res = await fetch(`${API_BASE}/api/jobs/${jobId}/start`, {
+      method: "POST"
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || "Failed to start processing");
+    }
+  };
+
   const done = status?.state === "done";
+  const ready = status?.state === "ready";
   const hasError = status?.state === "error";
+  const canDownloadVideo =
+    Boolean(jobId) &&
+    (status?.state === "ready" ||
+      status?.state === "done" ||
+      (status?.state === "processing" && status.step !== "download"));
   const hasLocalPlayer = Boolean(localVideoUrl && (localEnUrl || localRuUrl));
   const elapsedMs =
     status?.processingStartedAt != null
@@ -682,7 +723,21 @@ export default function App() {
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             />
             <button onClick={() => handleUpload().catch((err) => setError(String(err)))} disabled={!file}>
-              Upload & Process
+              Upload
+            </button>
+          </div>
+          <div className="youtube-import">
+            <input
+              type="url"
+              placeholder="https://www.youtube.com/watch?v=..."
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+            />
+            <button
+              onClick={() => handleYoutubeImport().catch((err) => setError(String(err)))}
+              disabled={!youtubeUrl.trim()}
+            >
+              Import from YouTube
             </button>
           </div>
 
@@ -713,9 +768,10 @@ export default function App() {
                   )}
                 </div>
               )}
-              {done && stepDurations && (
+              {(done || ready) && stepDurations && (
                 <div className="timings">
                   <div>Step timings:</div>
+                  <div>Download: {formatDurationMs(stepDurations.download ?? null)}</div>
                   <div>Extract: {formatDurationMs(stepDurations.extract ?? null)}</div>
                   <div>ASR: {formatDurationMs(stepDurations.asr ?? null)}</div>
                   <div>Translate: {formatDurationMs(stepDurations.translate ?? null)}</div>
@@ -724,6 +780,16 @@ export default function App() {
                 </div>
               )}
               {status.error && <div className="error">{status.error}</div>}
+              <div className="status-actions">
+                {canDownloadVideo && (
+                  <a href={`${API_BASE}/api/jobs/${jobId}/asset?download=1`}>Download video</a>
+                )}
+                {ready && (
+                  <button type="button" onClick={() => handleStartProcessing().catch((err) => setError(String(err)))}>
+                    Start subtitle processing
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -760,6 +826,7 @@ export default function App() {
           {playerMode === "processed" && done && jobId && (
             <div className="download">
               <span>Download subtitles:</span>
+              <a href={`${API_BASE}/api/jobs/${jobId}/asset?download=1`}>Video</a>
               <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.srt`}>EN SRT</a>
               <a href={`${API_BASE}/api/jobs/${jobId}/subs/ru.srt`}>RU SRT</a>
               <a href={`${API_BASE}/api/jobs/${jobId}/subs/en.vtt`}>EN VTT</a>

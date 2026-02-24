@@ -45,13 +45,17 @@ Backend: http://localhost:3001
 
 ## Usage
 1. Open the frontend.
-2. Upload an English video.
-3. Wait for processing.
-4. Toggle EN/RU subtitles in the player.
+2. Upload an English video or use `Import from YouTube`.
+3. For YouTube, wait until download finishes.
+4. Click `Start subtitle processing`.
+5. Toggle EN/RU subtitles in the player.
+6. Download subtitles and source video from the processed tab.
 
 ## Notes
 - Subtitles are stored as soft tracks (VTT/SRT), no burn-in.
 - Processing runs locally via ffmpeg + Whisper + Argos Translate.
+- YouTube import uses `yt-dlp` (installed from `apps/server/scripts/requirements.txt`).
+- Use YouTube import only for content you are allowed to download.
 
 ## Troubleshooting
 - If the model install appears to do nothing, run:

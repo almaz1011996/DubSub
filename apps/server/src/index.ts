@@ -14,8 +14,9 @@ const jobsDir = path.join(storageDir, "jobs");
 const PORT = Number(process.env.PORT ?? 3001);
 const WHISPER_MODEL = process.env.WHISPER_MODEL ?? "small";
 
-type JobState = "queued" | "processing" | "done" | "error";
-type JobStep = "upload" | "extract" | "asr" | "translate" | "convert";
+type JobState = "queued" | "ready" | "processing" | "done" | "error";
+type JobStep = "upload" | "download" | "extract" | "asr" | "translate" | "convert";
+type JobSource = "upload" | "youtube";
 type StepTiming = { startMs: number; endMs?: number; durationMs?: number };
 type StepTimings = Partial<Record<JobStep, StepTiming>>;
 
@@ -35,6 +36,11 @@ interface Job {
   ruSrtPath: string;
   enVttPath: string;
   ruVttPath: string;
+  source: JobSource;
+  youtubeUrl?: string;
+  maxHeight?: number;
+  downloadCompleted: boolean;
+  processRequested: boolean;
   createdAt: number;
   processingStartedAt?: number;
   processingFinishedAt?: number;
@@ -44,6 +50,7 @@ interface Job {
 const jobs = new Map<string, Job>();
 const queue: string[] = [];
 let isProcessing = false;
+let activeJobId: string | null = null;
 
 const app = express();
 app.use(cors());
@@ -61,6 +68,12 @@ function updateJob(job: Job, patch: Partial<Job>) {
   const next = { ...current, ...patch };
   jobs.set(job.id, next);
   return next;
+}
+
+function enqueueJob(jobId: string) {
+  if (queue.includes(jobId) || activeJobId === jobId) return;
+  queue.push(jobId);
+  processQueue();
 }
 
 function markStepStart(jobId: string, step: JobStep, startProcessing = false) {
@@ -123,11 +136,12 @@ function closeOpenStepOnError(job: Job) {
   }
 }
 
-const STEP_ORDER: JobStep[] = ["upload", "extract", "asr", "translate", "convert"];
+const STEP_ORDER: JobStep[] = ["upload", "download", "extract", "asr", "translate", "convert"];
 
 function buildStepDurations(job: Job) {
   const out: Record<JobStep, number | null> = {
     upload: null,
+    download: null,
     extract: null,
     asr: null,
     translate: null,
@@ -227,6 +241,85 @@ function sanitizeBasename(value: string) {
   return cleaned || "video";
 }
 
+function isYouTubeUrl(value: string) {
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.toLowerCase();
+    const isYouTubeHost =
+      hostname === "youtube.com" ||
+      hostname === "www.youtube.com" ||
+      hostname === "m.youtube.com" ||
+      hostname === "youtu.be" ||
+      hostname === "www.youtu.be";
+    if (!isYouTubeHost) return false;
+    if (hostname.includes("youtu.be")) {
+      const id = parsed.pathname.replace(/^\/+/, "").split("/")[0];
+      return Boolean(id);
+    }
+    return Boolean(parsed.searchParams.get("v"));
+  } catch {
+    return false;
+  }
+}
+
+function pickCommandJsonPayload(output: string) {
+  const normalized = output.replace(/\r/g, "\n");
+  const lines = normalized
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (!line.startsWith("{") || !line.endsWith("}")) continue;
+    try {
+      JSON.parse(line);
+      return line;
+    } catch {
+      // keep scanning previous lines
+    }
+  }
+  return "";
+}
+
+async function downloadYouTubeAsset(job: Job) {
+  if (!job.youtubeUrl) {
+    throw new Error("YouTube URL is missing for this job");
+  }
+  const downloadScript = path.join(rootDir, "apps", "server", "scripts", "ytdlp_download.py");
+  const maxHeight = job.maxHeight ?? 1080;
+  const raw = await runCommandCapture("python", [downloadScript, job.youtubeUrl, job.assetPath, String(maxHeight)]);
+  const payload = pickCommandJsonPayload(raw);
+  if (!payload) {
+    throw new Error("yt-dlp returned empty output");
+  }
+
+  let parsed: { asset_path?: string; title?: string; ext?: string };
+  try {
+    parsed = JSON.parse(payload) as { asset_path?: string; title?: string; ext?: string };
+  } catch {
+    throw new Error(`Unable to parse yt-dlp output: ${payload}`);
+  }
+
+  if (!parsed.asset_path) {
+    throw new Error("yt-dlp did not return downloaded file path");
+  }
+
+  const nextAssetPath = parsed.asset_path;
+  const nextExt = parsed.ext || path.extname(nextAssetPath) || ".mp4";
+  const nextBasename = sanitizeBasename(parsed.title || "youtube-video");
+  const nextOriginalFilename = `${nextBasename}${nextExt}`;
+  updateJob(job, {
+    assetPath: nextAssetPath,
+    basename: nextBasename,
+    originalFilename: nextOriginalFilename
+  });
+}
+
+async function probeYouTubeUrl(youtubeUrl: string) {
+  const downloadScript = path.join(rootDir, "apps", "server", "scripts", "ytdlp_download.py");
+  await runCommandCapture("python", [downloadScript, "--probe", youtubeUrl]);
+}
+
 async function runAsrWithProgress(
   job: Job,
   scriptPath: string,
@@ -295,6 +388,7 @@ async function processQueue() {
   if (!job) return;
 
   isProcessing = true;
+  activeJobId = nextId;
   try {
     await runJob(job);
   } catch (err) {
@@ -303,41 +397,73 @@ async function processQueue() {
     updateJob(job, { state: "error", error: message });
   } finally {
     isProcessing = false;
+    activeJobId = null;
     processQueue();
   }
 }
 
 async function runJob(job: Job) {
-  updateJob(job, { state: "processing", step: "extract", progress: 10 });
+  let current = jobs.get(job.id) ?? job;
+  if (current.state === "done") return;
+  if (current.source === "youtube" && !current.downloadCompleted) {
+    updateJob(job, { state: "processing", step: "download", progress: 5 });
+    markStepStart(job.id, "download", false);
+    await downloadYouTubeAsset(job);
+    markStepEnd(job.id, "download");
+    current = jobs.get(job.id) ?? job;
+    updateJob(current, { downloadCompleted: true, state: "ready", progress: 100 });
+    current = jobs.get(job.id) ?? current;
+  }
+
+  if (!current.processRequested) {
+    if (current.state !== "ready") {
+      updateJob(current, {
+        state: "ready",
+        step: current.downloadCompleted ? current.step : "download",
+        progress: current.downloadCompleted ? Math.max(current.progress, 5) : current.progress
+      });
+    }
+    return;
+  }
+
+  updateJob(current, {
+    state: "processing",
+    step: "extract",
+    progress: current.source === "youtube" ? 20 : 10
+  });
   markStepStart(job.id, "extract", true);
-  const jobFolder = path.dirname(job.assetPath);
+  current = jobs.get(job.id) ?? current;
+  const jobFolder = path.dirname(current.assetPath);
   const audioPath = path.join(jobFolder, "audio.wav");
-  await runCommand("ffmpeg", ["-y", "-i", job.assetPath, "-vn", "-ac", "1", "-ar", "16000", audioPath]);
+  await runCommand("ffmpeg", ["-y", "-i", current.assetPath, "-vn", "-ac", "1", "-ar", "16000", audioPath]);
   markStepEnd(job.id, "extract");
 
   const audioDuration = await getMediaDurationSeconds(audioPath);
-  updateJob(job, { step: "asr", progress: 40, asrTotalSec: audioDuration });
+  updateJob(current, { step: "asr", progress: 40, asrTotalSec: audioDuration });
   markStepStart(job.id, "asr");
   const asrScript = path.join(rootDir, "apps", "server", "scripts", "asr.py");
-  await runAsrWithProgress(job, asrScript, audioPath, job.enSrtPath, audioDuration);
+  await runAsrWithProgress(current, asrScript, audioPath, current.enSrtPath, audioDuration);
   markStepEnd(job.id, "asr");
 
-  updateJob(job, { step: "translate", progress: 70 });
+  current = jobs.get(job.id) ?? current;
+  updateJob(current, { step: "translate", progress: 70 });
   markStepStart(job.id, "translate");
   const translateScript = path.join(rootDir, "apps", "server", "scripts", "translate.py");
-  await runCommand("python", [translateScript, job.enSrtPath, job.ruSrtPath]);
+  await runCommand("python", [translateScript, current.enSrtPath, current.ruSrtPath]);
   markStepEnd(job.id, "translate");
 
-  updateJob(job, { step: "convert", progress: 90 });
+  current = jobs.get(job.id) ?? current;
+  updateJob(current, { step: "convert", progress: 90 });
   markStepStart(job.id, "convert");
-  const enSrt = await fs.readFile(job.enSrtPath, "utf-8");
-  const ruSrt = await fs.readFile(job.ruSrtPath, "utf-8");
-  await fs.writeFile(job.enVttPath, srtToVtt(enSrt), "utf-8");
-  await fs.writeFile(job.ruVttPath, srtToVtt(ruSrt), "utf-8");
+  const enSrt = await fs.readFile(current.enSrtPath, "utf-8");
+  const ruSrt = await fs.readFile(current.ruSrtPath, "utf-8");
+  await fs.writeFile(current.enVttPath, srtToVtt(enSrt), "utf-8");
+  await fs.writeFile(current.ruVttPath, srtToVtt(ruSrt), "utf-8");
   markStepEnd(job.id, "convert");
 
   finalizeProcessing(job.id);
-  updateJob(job, { state: "done", progress: 100 });
+  current = jobs.get(job.id) ?? current;
+  updateJob(current, { state: "done", progress: 100 });
 }
 
 app.post("/api/jobs", upload.single("file"), async (req, res) => {
@@ -358,9 +484,9 @@ app.post("/api/jobs", upload.single("file"), async (req, res) => {
 
   const job: Job = {
     id,
-    state: "queued",
+    state: "ready",
     step: "upload",
-    progress: 0,
+    progress: 5,
     originalFilename,
     basename,
     assetPath,
@@ -368,14 +494,78 @@ app.post("/api/jobs", upload.single("file"), async (req, res) => {
     ruSrtPath: path.join(jobFolder, "ru.srt"),
     enVttPath: path.join(jobFolder, "en.vtt"),
     ruVttPath: path.join(jobFolder, "ru.vtt"),
+    source: "upload",
+    downloadCompleted: true,
+    processRequested: false,
     createdAt: Date.now()
   };
 
   jobs.set(id, job);
-  queue.push(id);
-  processQueue();
 
   return res.json({ jobId: id });
+});
+
+app.post("/api/jobs/youtube", async (req, res) => {
+  const { url, maxHeight } = req.body as { url?: string; maxHeight?: number };
+  const youtubeUrl = url?.trim() ?? "";
+  if (!youtubeUrl || !isYouTubeUrl(youtubeUrl)) {
+    return res.status(400).json({ error: "Invalid YouTube URL" });
+  }
+  try {
+    await probeYouTubeUrl(youtubeUrl);
+  } catch (err) {
+    return res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+
+  const normalizedHeight = Number.isFinite(maxHeight) ? Math.max(144, Math.round(Number(maxHeight))) : 1080;
+  const id = uuidv4();
+  const basename = sanitizeBasename("youtube-video");
+  const jobFolder = path.join(jobsDir, id);
+  await fs.mkdir(jobFolder, { recursive: true });
+
+  const assetPath = path.join(jobFolder, "video.mp4");
+  const job: Job = {
+    id,
+    state: "queued",
+    step: "download",
+    progress: 0,
+    originalFilename: `${basename}.mp4`,
+    basename,
+    assetPath,
+    enSrtPath: path.join(jobFolder, "en.srt"),
+    ruSrtPath: path.join(jobFolder, "ru.srt"),
+    enVttPath: path.join(jobFolder, "en.vtt"),
+    ruVttPath: path.join(jobFolder, "ru.vtt"),
+    source: "youtube",
+    youtubeUrl,
+    maxHeight: normalizedHeight,
+    downloadCompleted: false,
+    processRequested: false,
+    createdAt: Date.now()
+  };
+
+  jobs.set(id, job);
+  enqueueJob(id);
+
+  return res.json({ jobId: id });
+});
+
+app.post("/api/jobs/:id/start", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "not found" });
+  if (job.state === "done") {
+    return res.json({ jobId: job.id, state: job.state });
+  }
+  if (job.state === "error") {
+    return res.status(409).json({ error: "job is in error state" });
+  }
+
+  const next = updateJob(job, {
+    processRequested: true,
+    state: job.state === "ready" ? "queued" : job.state
+  });
+  enqueueJob(next.id);
+  return res.json({ jobId: next.id, state: next.state });
 });
 
 app.get("/api/jobs/:id", (req, res) => {
@@ -406,9 +596,18 @@ app.get("/api/jobs/:id", (req, res) => {
   });
 });
 
-app.get("/api/jobs/:id/asset", (req, res) => {
+app.get("/api/jobs/:id/asset", async (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).end();
+  try {
+    await fs.access(job.assetPath);
+  } catch {
+    return res.status(404).json({ error: "asset not ready" });
+  }
+  if (req.query.download === "1") {
+    const ext = path.extname(job.assetPath) || ".mp4";
+    return res.download(job.assetPath, `${job.basename}${ext}`);
+  }
   return res.sendFile(job.assetPath);
 });
 

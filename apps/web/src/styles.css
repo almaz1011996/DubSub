@@ -77,6 +77,24 @@ body {
   align-items: center;
 }
 
+.youtube-import {
+  margin-top: 12px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.youtube-import input {
+  flex: 1 1 360px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  color: #f6f2eb;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
 button {
   background: #f8b44c;
   border: none;
@@ -112,6 +130,18 @@ button:disabled {
 .error {
   margin-top: 12px;
   color: #ff8989;
+}
+
+.status a {
+  color: #f8d28c;
+}
+
+.status-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  align-items: center;
 }
 
 .toggles {
